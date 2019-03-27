@@ -24,6 +24,8 @@ import edu.wpi.cscore.UsbCamera;
 import edu.wpi.cscore.VideoSource;
 import edu.wpi.first.cameraserver.CameraServer;
 import edu.wpi.first.networktables.EntryListenerFlags;
+import edu.wpi.first.networktables.NetworkTable;
+import edu.wpi.first.networktables.NetworkTableEntry;
 import edu.wpi.first.networktables.NetworkTableInstance;
 import edu.wpi.first.vision.VisionPipeline;
 import edu.wpi.first.vision.VisionThread;
@@ -294,33 +296,68 @@ public final class Main {
 
   public static Mat evilRobotOrig = Imgcodecs.imread("/home/pi/images/evil-boss-guy.JPG");
   public static Mat evilRobot = new Mat();
-  public static final float MOVE_PER_SECOND = 0.25f;
+  public static final int REDUCED_IMAGE_SIZE = 40;  // This roughly controls the rate at which the image moves across the screen
+  public static final int PIXELS_PER_FRAME = 8;  // This roughly controls the rate at which the image moves across the screen
 
   /**
-   * Reticle pipeline.
+   * Easteregg pipeline.
    */
-  public static class MyPipeline implements VisionPipeline {
+  public static class EastereggPipeline implements VisionPipeline {
+    public boolean eastereggActive = false;
+    private boolean eastereggInit = true;
+    private static final int STARTING_POS = -REDUCED_IMAGE_SIZE + 2;
     public Mat output = new Mat();
-    private int count = 0;
-    private int xPos = -1;
+    private Rect sourceRect = new Rect();
+    private Rect eastereggRect = new Rect();
+    private int xPos = STARTING_POS;
+
+    private void placeEasteregg(Mat source) {
+      if (eastereggActive) {
+
+        if (eastereggInit) {
+          System.out.println("INFO: Starting placeEasteregg");
+          xPos = STARTING_POS;
+          eastereggInit = false;
+        }
+
+        Size matSize = source.size();
+        int rightPos = xPos + REDUCED_IMAGE_SIZE - 1;
+        int bottomPos = (int) matSize.height - REDUCED_IMAGE_SIZE - 1;
+
+        if (xPos < 0 && rightPos >= 0) { // Easteregg is hanging off of the left side of the image
+          sourceRect = new Rect(0, bottomPos, rightPos+1, REDUCED_IMAGE_SIZE);
+          eastereggRect = new Rect(REDUCED_IMAGE_SIZE-rightPos-1, 0, rightPos+1, REDUCED_IMAGE_SIZE);
+        } else if (xPos < matSize.width && rightPos >= matSize.width) {  // Easteregg is hanging off of the right side of the image
+          sourceRect = new Rect(xPos, bottomPos, (int) matSize.width-xPos-1, REDUCED_IMAGE_SIZE);
+          eastereggRect = new Rect(0, 0, (int) matSize.width-xPos-1, REDUCED_IMAGE_SIZE);
+        } else if (xPos >= matSize.width ) { // Easteregg is totally off of the right side of the image
+          System.out.println("INFO: Stopping placeEasteregg");
+          sourceRect = new Rect(0, 0, 0, 0);
+          eastereggRect = new Rect(0, 0, 0, 0);
+          eastereggActive = false;
+          eastereggInit = true;
+        } else {
+          sourceRect = new Rect(xPos, bottomPos, REDUCED_IMAGE_SIZE, REDUCED_IMAGE_SIZE);
+          eastereggRect = new Rect(0, 0, REDUCED_IMAGE_SIZE, REDUCED_IMAGE_SIZE);
+        }
+
+        if (sourceRect.width != 0) {
+          Mat imageROI = source.submat(sourceRect);
+          Mat eastereggROI = evilRobot.submat(eastereggRect);
+          eastereggROI.copyTo(imageROI);
+        }
+
+        if (xPos <= matSize.width) {
+          xPos += PIXELS_PER_FRAME;
+        }
+      }
+
+      source.copyTo(output);
+    }
 
     @Override
     public void process(Mat mat) {
-      if (count % MOVE_PER_SECOND == 0) {
-        if (count < 4*MOVE_PER_SECOND * 120) {
-          xPos += 2;
-        } else if ((4*MOVE_PER_SECOND*120) <= count && count < 8*(MOVE_PER_SECOND*120)-1) {
-          xPos -= 2;
-        } else {
-          count = -1;
-          xPos = 0;
-        }
-      }
-      System.out.println(String.format("INFO: xPos: %d, count: %d", xPos, count));
-      Mat imageROI = mat.submat(new Rect(xPos, 60, 40, 40));
-      evilRobot.copyTo(imageROI);
-      mat.copyTo(output);
-      count++;
+      placeEasteregg(mat);
     }
   }
 
@@ -357,14 +394,27 @@ public final class Main {
       startSwitchedCamera(config);
     }
 
-    Imgproc.resize(evilRobotOrig, evilRobot, new Size(40, 40));
+    // Bring image down to known, smaller size
+    Imgproc.resize(evilRobotOrig, evilRobot, new Size(REDUCED_IMAGE_SIZE, REDUCED_IMAGE_SIZE));
+
+    // Pull down network tables easteregg values
+    NetworkTableInstance netInst = NetworkTableInstance.getDefault();
+    NetworkTable table = netInst.getTable("datatable");
+    NetworkTableEntry eastereggEntry = table.getEntry("easteregg");
 
     // start image processing on camera 0 if present
     if (cameras.size() >= 1) {
-      CvSource outputStream = CameraServer.getInstance().putVideo("Target Reticle", 160, 120);
+      CvSource outputStream = CameraServer.getInstance().putVideo("Pipeline Video", 160, 120);
       /* MyPipeline code */
       VisionThread visionThread = new VisionThread(cameras.get(0),
-              new MyPipeline(), pipeline -> {
+              new EastereggPipeline(), pipeline -> {
+        if (!pipeline.eastereggActive) {
+          boolean eastereggActivate = eastereggEntry.getBoolean(false);
+          if (eastereggActivate) {
+            pipeline.eastereggActive = true;
+            eastereggEntry.setBoolean(false);
+          }
+        }
         outputStream.putFrame(pipeline.output);
       });
       visionThread.start();
